@@ -4,6 +4,8 @@ import { useAuthStore } from "../store/authStore";
 import { useStoreSettingsStore } from "./StoreSettings";
 import { Lock, Mail, LogIn } from "lucide-react";
 
+const API_URL = import.meta.env.VITE_API_URL || window.location.origin;
+
 export function LoginPage() {
   const navigate = useNavigate();
   const { setUser } = useAuthStore();
@@ -19,7 +21,7 @@ export function LoginPage() {
     setLoading(true);
 
     try {
-      const res = await fetch("http://localhost:3001/api/auth/login", {
+      const res = await fetch(`${API_URL}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),

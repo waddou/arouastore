@@ -16,19 +16,29 @@ import type {
   RepairsReportData,
 } from "../types";
 
-// Backend URL - LOCAL for development
-const API_URL = "http://localhost:3001";
+// Backend URL - use environment variable or default to production
+const API_URL = import.meta.env.VITE_API_URL || window.location.origin;
 
 // Simple fetch wrapper for local backend
 const localFetch = async (path: string, options?: RequestInit) => {
+  // Get user from authStore if available
+  const authStore = await import('../store/authStore').then(m => m.useAuthStore);
+  const user = authStore.getState().user;
+  
+  const headers: Record<string, string> = {
+    ...options?.headers as Record<string, string>,
+  };
+  
+  // Only add auth headers if user is logged in
+  if (user) {
+    headers["x-auth-user-id"] = user.id;
+    headers["x-auth-email"] = user.email;
+    headers["x-auth-name"] = user.name;
+  }
+  
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
-    headers: {
-      ...options?.headers,
-      "x-auth-user-id": "JuL5vmdvmHbGggT0xUHJw3pMw5ZbqBUK",
-      "x-auth-email": "kuarigama@heure-salat.com",
-      "x-auth-name": "kuarigama",
-    },
+    headers,
   });
   return res;
 };
