@@ -6,8 +6,8 @@ set -e
 echo "Cleaning up package-lock.json and node_modules..."
 rm -rf package-lock.json node_modules
 
-echo "Installing dependencies..."
-npm install
+echo "Installing dependencies (including dev dependencies)..."
+npm install --include=dev
 
 echo "Building application..."
-npm run build
+npx vite build
