@@ -53,13 +53,6 @@ app.use(express.json());
 if (process.env.NODE_ENV === 'production') {
   const buildPath = path.join(__dirname, '../dist');
   app.use(express.static(buildPath));
-
-  // Toutes les routes non-API retournent index.html (SPA support)
-  app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api/')) {
-      res.sendFile(path.join(buildPath, 'index.html'));
-    }
-  });
 }
 
 
@@ -3281,6 +3274,14 @@ app.get("/api/public/reports/repairs", async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
+// === SPA CATCH-ALL ROUTE (must be after all API routes) ===
+if (process.env.NODE_ENV === 'production') {
+  const buildPath = path.join(__dirname, '../dist');
+  app.get('/*', (req, res) => {
+    res.sendFile(path.join(buildPath, 'index.html'));
+  });
+}
 
 // Middleware de gestion d'erreurs global
 app.use((err, req, res, next) => {
