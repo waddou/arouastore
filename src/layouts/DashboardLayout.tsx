@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -11,11 +11,17 @@ import {
   Settings,
   Wallet,
   Users,
+  Truck,
+  ClipboardList,
+  BarChart3,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import clsx from "clsx";
 import { client } from "../api/client";
 import { useAuthStore } from "../store/authStore";
+import { NotificationBell } from "../components/notifications/NotificationBell";
+import { NotificationPanel } from "../components/notifications/NotificationPanel";
+import { useNotificationStore } from "../store/notificationStore";
 
 export const DashboardLayout = ({
   children,
@@ -24,9 +30,17 @@ export const DashboardLayout = ({
 }) => {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const { user, reset } = useAuthStore();
+  const { startPolling, stopPolling } = useNotificationStore();
+
+  useEffect(() => {
+    startPolling();
+    return () => stopPolling();
+  }, [startPolling, stopPolling]);
 
   const handleLogout = async () => {
+    stopPolling();
     await client.auth.signOut();
     reset();
   };
@@ -47,6 +61,24 @@ export const DashboardLayout = ({
     { icon: Users, label: "Clients", path: "/customers" },
     { icon: Wrench, label: "Réparations", path: "/repairs" },
     { icon: Package, label: "Stock", path: "/inventory" },
+    {
+      icon: Truck,
+      label: "Fournisseurs",
+      path: "/admin/suppliers",
+      hideForAgent: true,
+    },
+    {
+      icon: ClipboardList,
+      label: "Bons de commande",
+      path: "/admin/purchase-orders",
+      hideForAgent: true,
+    },
+    {
+      icon: BarChart3,
+      label: "Rapports",
+      path: "/admin/reports",
+      hideForAgent: true,
+    },
     {
       icon: Settings,
       label: "Administration",
@@ -160,14 +192,26 @@ export const DashboardLayout = ({
       </motion.aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto p-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-        >
-          {children}
-        </motion.div>
+      <main className="flex-1 overflow-y-auto flex flex-col">
+        {/* Top bar with notification bell */}
+        <div className="flex items-center justify-end px-8 pt-4 pb-0">
+          <div className="relative">
+            <NotificationBell onClick={() => setNotifOpen(!notifOpen)} />
+            <NotificationPanel
+              isOpen={notifOpen}
+              onClose={() => setNotifOpen(false)}
+            />
+          </div>
+        </div>
+        <div className="flex-1 p-8 pt-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+          >
+            {children}
+          </motion.div>
+        </div>
       </main>
     </div>
   );

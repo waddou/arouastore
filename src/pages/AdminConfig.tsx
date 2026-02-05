@@ -11,6 +11,7 @@ import {
   Store,
   ShoppingBag,
   Smartphone,
+  Star,
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuthStore } from "../store/authStore";
@@ -90,6 +91,16 @@ const allConfigCards: ConfigCard[] = [
     path: "/admin/store",
     color: "text-rose-400",
     bgColor: "bg-rose-500/20 hover:bg-rose-500/30 border-rose-500/30",
+    adminOnly: true,
+  },
+  {
+    icon: Star,
+    title: "Programme de fidélité",
+    description:
+      "Configurer les points de fidélité, taux de conversion et activation",
+    path: "/admin/loyalty",
+    color: "text-yellow-400",
+    bgColor: "bg-yellow-500/20 hover:bg-yellow-500/30 border-yellow-500/30",
     adminOnly: true,
   },
 ];

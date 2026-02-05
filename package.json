@@ -8,7 +8,9 @@
     "backend": "node local-backend/server.cjs",
     "start": "concurrently \"npm run backend\" \"npm run dev\"",
     "build": "npx vite build",
-    "preview": "vite preview"
+    "start:prod": "NODE_ENV=production node local-backend/server.cjs",
+    "preview": "vite preview",
+    "test": "vitest"
   },
   "dependencies": {
     "@edgespark/client": "^1.0.3",

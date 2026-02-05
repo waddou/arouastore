@@ -1,3 +1,21 @@
+import type {
+  Notification,
+  Supplier,
+  CreateSupplierInput,
+  PurchaseOrder,
+  PurchaseOrderDetail,
+  CreatePurchaseOrderInput,
+  ReceiveItem,
+  CustomerLoyaltyData,
+  LoyaltySettings,
+  SaleReceiptData,
+  RepairTicketData,
+  SalesReportData,
+  InventoryReportData,
+  CashSessionsReportData,
+  RepairsReportData,
+} from "../types";
+
 // Backend URL - LOCAL for development
 const API_URL = "http://localhost:3001";
 
@@ -436,6 +454,238 @@ export const api = {
     });
     const json = await res.json();
     if (json.error) throw new Error(json.error);
+  },
+
+  // ── Receipts & Tickets (US1) ──
+
+  async getSaleReceipt(saleId: number): Promise<SaleReceiptData> {
+    const res = await localFetch(`/api/public/sales/${saleId}/receipt`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async getRepairTicket(repairId: number): Promise<RepairTicketData> {
+    const res = await localFetch(`/api/public/repairs/${repairId}/ticket`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  // ── Notifications (US2) ──
+
+  async getNotifications(params?: {
+    unreadOnly?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ notifications: Notification[]; unreadCount: number }> {
+    const qs = new URLSearchParams();
+    if (params?.unreadOnly) qs.set("unread_only", "true");
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset) qs.set("offset", String(params.offset));
+    const res = await localFetch(
+      `/api/notifications${qs.toString() ? `?${qs}` : ""}`,
+    );
+    const json = await res.json();
+    return json.data;
+  },
+
+  async getUnreadNotificationCount(): Promise<number> {
+    const res = await localFetch("/api/notifications/unread-count");
+    const json = await res.json();
+    return json.data.count;
+  },
+
+  async markNotificationRead(id: number): Promise<void> {
+    await localFetch(`/api/notifications/${id}/read`, { method: "PUT" });
+  },
+
+  async markAllNotificationsRead(): Promise<void> {
+    await localFetch("/api/notifications/read-all", { method: "PUT" });
+  },
+
+  // ── Suppliers (US3) ──
+
+  async getSuppliers(): Promise<Supplier[]> {
+    const res = await localFetch("/api/public/suppliers");
+    const json = await res.json();
+    return json.data;
+  },
+
+  async getSupplier(id: number): Promise<Supplier> {
+    const res = await localFetch(`/api/public/suppliers/${id}`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async createSupplier(supplier: CreateSupplierInput): Promise<Supplier> {
+    const res = await localFetch("/api/admin/suppliers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(supplier),
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async updateSupplier(
+    id: number,
+    updates: Partial<CreateSupplierInput>,
+  ): Promise<Supplier> {
+    const res = await localFetch(`/api/admin/suppliers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async deleteSupplier(id: number): Promise<void> {
+    const res = await localFetch(`/api/admin/suppliers/${id}`, {
+      method: "DELETE",
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+  },
+
+  // ── Purchase Orders (US3) ──
+
+  async getPurchaseOrders(params?: {
+    status?: string;
+    supplierId?: number;
+    limit?: number;
+  }): Promise<PurchaseOrder[]> {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.supplierId) qs.set("supplier_id", String(params.supplierId));
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const res = await localFetch(
+      `/api/public/purchase-orders${qs.toString() ? `?${qs}` : ""}`,
+    );
+    const json = await res.json();
+    return json.data;
+  },
+
+  async getPurchaseOrder(id: number): Promise<PurchaseOrderDetail> {
+    const res = await localFetch(`/api/public/purchase-orders/${id}`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async createPurchaseOrder(
+    order: CreatePurchaseOrderInput,
+  ): Promise<PurchaseOrder> {
+    const res = await localFetch("/api/admin/purchase-orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(order),
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async receivePurchaseOrder(
+    id: number,
+    items: ReceiveItem[],
+  ): Promise<PurchaseOrder> {
+    const res = await localFetch(`/api/admin/purchase-orders/${id}/receive`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async cancelPurchaseOrder(id: number): Promise<void> {
+    const res = await localFetch(`/api/admin/purchase-orders/${id}/cancel`, {
+      method: "PUT",
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+  },
+
+  // ── Loyalty (US4) ──
+
+  async getCustomerLoyalty(customerId: number): Promise<CustomerLoyaltyData> {
+    const res = await localFetch(`/api/public/customers/${customerId}/loyalty`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async getLoyaltySettings(): Promise<LoyaltySettings> {
+    const res = await localFetch("/api/public/loyalty/settings");
+    const json = await res.json();
+    return json.data;
+  },
+
+  async updateLoyaltySettings(
+    settings: Partial<LoyaltySettings>,
+  ): Promise<LoyaltySettings> {
+    const res = await localFetch("/api/admin/loyalty/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  // ── Reports (US5) ──
+
+  async getSalesReport(from: string, to: string): Promise<SalesReportData> {
+    // Convert "YYYY-MM-DD" to Unix timestamp (seconds)
+    const fromTimestamp = Math.floor(new Date(from).getTime() / 1000);
+    const toTimestamp = Math.floor(new Date(to + "T23:59:59").getTime() / 1000);
+    const res = await localFetch(
+      `/api/public/reports/sales?from=${fromTimestamp}&to=${toTimestamp}`,
+    );
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async getInventoryReport(): Promise<InventoryReportData> {
+    const res = await localFetch("/api/public/reports/inventory");
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async getCashSessionsReport(
+    from: string,
+    to: string,
+  ): Promise<CashSessionsReportData> {
+    // Convert "YYYY-MM-DD" to Unix timestamp (seconds)
+    const fromTimestamp = Math.floor(new Date(from).getTime() / 1000);
+    const toTimestamp = Math.floor(new Date(to + "T23:59:59").getTime() / 1000);
+    const res = await localFetch(
+      `/api/public/reports/cash-sessions?from=${fromTimestamp}&to=${toTimestamp}`,
+    );
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
+  },
+
+  async getRepairsReport(from: string, to: string): Promise<RepairsReportData> {
+    // Convert "YYYY-MM-DD" to Unix timestamp (seconds)
+    const fromTimestamp = Math.floor(new Date(from).getTime() / 1000);
+    const toTimestamp = Math.floor(new Date(to + "T23:59:59").getTime() / 1000);
+    const res = await localFetch(
+      `/api/public/reports/repairs?from=${fromTimestamp}&to=${toTimestamp}`,
+    );
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return json.data;
   },
 };
 

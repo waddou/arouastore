@@ -3,18 +3,41 @@
 @import "tailwindcss/utilities";
 
 @layer base {
-  body {
-    @apply bg-dark-bg text-white antialiased;
-  }
-  
-  /* Custom Scrollbar */
-  ::-webkit-scrollbar {
-    width: 8px;
-  }
-  ::-webkit-scrollbar-track {
-    @apply bg-dark-bg;
-  }
-  ::-webkit-scrollbar-thumb {
-    @apply bg-dark-border rounded-full hover:bg-slate-600;
-  }
+    body {
+        @apply bg-dark-bg text-white antialiased;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        @apply bg-dark-bg;
+    }
+    ::-webkit-scrollbar-thumb {
+        @apply bg-dark-border rounded-full hover:bg-slate-600;
+    }
+}
+
+/* ── Print Styles ── */
+@media print {
+    body > *:not(#print-container) {
+        display: none !important;
+    }
+    #print-container {
+        display: block !important;
+        position: absolute;
+        top: 0;
+        left: 0;
+    }
+    body {
+        background: white !important;
+        color: black !important;
+        margin: 0;
+        padding: 0;
+    }
+    @page {
+        size: 80mm auto;
+        margin: 0;
+    }
 }

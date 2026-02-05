@@ -18,11 +18,14 @@ import {
   ChevronRight,
   Package,
   Pencil,
+  Printer,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { RepairStatus, Product } from "../types";
 import { useSettingsStore } from "./CurrencySettings";
 import { api, DeviceBrand, DeviceModel } from "../api/client";
+import { RepairTicket } from "../components/receipts/RepairTicket";
+import { printElement } from "../utils/print";
 
 const statusConfig: Record<
   RepairStatus,
@@ -474,6 +477,15 @@ export const Repairs = () => {
     return customers.find((c) => c.id === customerId);
   };
 
+  const handlePrintTicket = async (repairId: number) => {
+    try {
+      const ticketData = await api.getRepairTicket(repairId);
+      printElement(React.createElement(RepairTicket, { data: ticketData }));
+    } catch (error) {
+      console.error("Error printing ticket:", error);
+    }
+  };
+
   return (
     <div className="space-y-8">
       <header className="flex justify-between items-center">
@@ -576,6 +588,13 @@ export const Repairs = () => {
                           )}
 
                           <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-all">
+                            <button
+                              onClick={() => handlePrintTicket(repair.id)}
+                              className="flex items-center justify-center gap-1 py-2 px-2 text-sm text-slate-400 hover:text-primary-400 border border-dark-border rounded-lg hover:border-primary-500/50 transition-all"
+                              title="Imprimer le ticket"
+                            >
+                              <Printer size={14} />
+                            </button>
                             <button
                               onClick={() => openEditModal(repair.id)}
                               className="flex-1 flex items-center justify-center gap-2 py-2 text-sm text-slate-400 hover:text-amber-400 border border-dark-border rounded-lg hover:border-amber-500/50 transition-all"

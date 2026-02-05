@@ -14,6 +14,10 @@ import { StoreSettings } from "./pages/StoreSettings";
 import { ProductManagement } from "./pages/ProductManagement";
 import { DeviceBrandsManagement } from "./pages/DeviceBrandsManagement";
 import { CashRegister } from "./pages/CashRegister";
+import { Suppliers } from "./pages/Suppliers";
+import { PurchaseOrders } from "./pages/PurchaseOrders";
+import { Reports } from "./pages/Reports";
+import { LoyaltySettings } from "./pages/LoyaltySettings";
 import { LoginPage } from "./pages/LoginPage";
 import { useAuthStore } from "./store/authStore";
 import { client, api } from "./api/client";
@@ -138,6 +142,13 @@ function App() {
                 path="/admin/device-brands"
                 element={<DeviceBrandsManagement />}
               />
+              <Route path="/admin/suppliers" element={<Suppliers />} />
+              <Route
+                path="/admin/purchase-orders"
+                element={<PurchaseOrders />}
+              />
+              <Route path="/admin/reports" element={<Reports />} />
+              <Route path="/admin/loyalty" element={<LoyaltySettings />} />
             </>
           )}
           <Route path="*" element={<Navigate to="/" />} />

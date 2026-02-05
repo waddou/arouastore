@@ -18,10 +18,13 @@ import {
   UserPlus,
   Wallet,
   AlertTriangle,
+  Printer,
 } from "lucide-react";
 import { useSettingsStore } from "./CurrencySettings";
 import { Customer, CashSession } from "../types";
 import { api } from "../api/client";
+import { SaleReceipt } from "../components/receipts/SaleReceipt";
+import { printElement } from "../utils/print";
 
 type DiscountType = "percent" | "fixed";
 type PaymentMethod = "cash" | "card" | "mobile";
@@ -73,6 +76,13 @@ export const POS = () => {
   // Success
   const [showSuccess, setShowSuccess] = useState(false);
   const [changeAmount, setChangeAmount] = useState<number | null>(null);
+  const [lastSaleId, setLastSaleId] = useState<number | null>(null);
+
+  // Loyalty
+  const [loyaltyPoints, setLoyaltyPoints] = useState<number>(0);
+  const [loyaltyEquivalent, setLoyaltyEquivalent] = useState<number>(0);
+  const [useLoyalty, setUseLoyalty] = useState(false);
+  const [loyaltyDiscount, setLoyaltyDiscount] = useState<number>(0);
 
   useEffect(() => {
     fetchProducts();
@@ -123,12 +133,24 @@ export const POS = () => {
     return Math.min(discountValue, subtotal);
   }, [subtotal, discountType, discountValue]);
 
-  const total = subtotal - discountAmount;
+  const effectiveLoyaltyDiscount = useLoyalty
+    ? Math.min(loyaltyEquivalent, subtotal - discountAmount)
+    : 0;
+  const total = subtotal - discountAmount - effectiveLoyaltyDiscount;
 
-  const handleSelectCustomer = (customer: Customer) => {
+  const handleSelectCustomer = async (customer: Customer) => {
     setSelectedCustomer(customer);
     setShowCustomerModal(false);
     setCustomerSearch("");
+    // Fetch loyalty data
+    try {
+      const loyalty = await api.getCustomerLoyalty(customer.id);
+      setLoyaltyPoints(loyalty.loyaltyPoints);
+      setLoyaltyEquivalent(loyalty.equivalentDiscount);
+    } catch {
+      setLoyaltyPoints(0);
+      setLoyaltyEquivalent(0);
+    }
   };
 
   const handleCreateCustomer = async () => {
@@ -162,21 +184,36 @@ export const POS = () => {
   const handleCheckout = async () => {
     const sale = await checkout(
       selectedCustomer?.id,
-      discountAmount,
+      discountAmount + effectiveLoyaltyDiscount,
       paymentMethod,
     );
     if (sale) {
       setChangeAmount(calculatedChange);
+      setLastSaleId(sale.id);
       setShowPaymentModal(false);
       setShowSuccess(true);
       // Reset state
       setSelectedCustomer(null);
       setDiscountValue(0);
       setAmountReceived("");
+      setUseLoyalty(false);
+      setLoyaltyPoints(0);
+      setLoyaltyEquivalent(0);
+      setLoyaltyDiscount(0);
       setTimeout(() => {
         setShowSuccess(false);
         setChangeAmount(null);
-      }, 4000);
+        setLastSaleId(null);
+      }, 8000);
+    }
+  };
+
+  const handlePrintReceipt = async (saleId: number) => {
+    try {
+      const receiptData = await api.getSaleReceipt(saleId);
+      printElement(React.createElement(SaleReceipt, { data: receiptData }));
+    } catch (error) {
+      console.error("Error printing receipt:", error);
     }
   };
 
@@ -227,7 +264,7 @@ export const POS = () => {
     <div className="flex h-[calc(100vh-8rem)] gap-6">
       {/* Success notification */}
       {showSuccess && (
-        <div className="fixed top-4 right-4 bg-emerald-600 text-white px-6 py-4 rounded-xl shadow-2xl z-50 animate-pulse">
+        <div className="fixed top-4 right-4 bg-emerald-600 text-white px-6 py-4 rounded-xl shadow-2xl z-50">
           <div className="flex items-center gap-3">
             <Check size={24} />
             <div>
@@ -241,6 +278,15 @@ export const POS = () => {
                 </p>
               )}
             </div>
+            {lastSaleId && (
+              <button
+                onClick={() => handlePrintReceipt(lastSaleId)}
+                className="ml-4 flex items-center gap-1.5 bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+              >
+                <Printer size={16} />
+                Imprimer
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -617,6 +663,9 @@ export const POS = () => {
                 onClick={(e) => {
                   e.stopPropagation();
                   setSelectedCustomer(null);
+                  setUseLoyalty(false);
+                  setLoyaltyPoints(0);
+                  setLoyaltyEquivalent(0);
                 }}
                 className="text-slate-500 hover:text-rose-400"
               >
@@ -624,6 +673,51 @@ export const POS = () => {
               </button>
             )}
           </button>
+
+          {/* Loyalty points display */}
+          {selectedCustomer && loyaltyPoints > 0 && (
+            <div className="mt-3">
+              <button
+                onClick={() => setUseLoyalty(!useLoyalty)}
+                className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                  useLoyalty
+                    ? "bg-yellow-500/10 border-yellow-500/30"
+                    : "bg-dark-bg border-dark-border hover:border-slate-500"
+                }`}
+              >
+                <div
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    useLoyalty ? "bg-yellow-500" : "bg-dark-surface"
+                  }`}
+                >
+                  <span
+                    className={`text-sm font-bold ${useLoyalty ? "text-black" : "text-slate-400"}`}
+                  >
+                    ★
+                  </span>
+                </div>
+                <div className="flex-1 text-left">
+                  <p
+                    className={`text-sm font-medium ${useLoyalty ? "text-yellow-400" : "text-slate-300"}`}
+                  >
+                    {loyaltyPoints} points fidélité
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Valeur: {formatPrice(loyaltyEquivalent)}
+                  </p>
+                </div>
+                <div
+                  className={`text-xs px-2 py-1 rounded-full ${
+                    useLoyalty
+                      ? "bg-yellow-500/20 text-yellow-400"
+                      : "bg-dark-surface text-slate-500"
+                  }`}
+                >
+                  {useLoyalty ? "Appliqué" : "Utiliser"}
+                </div>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Cart items */}
@@ -805,6 +899,14 @@ export const POS = () => {
                 <span className="text-amber-400">Remise</span>
                 <span className="text-amber-400">
                   -{formatPrice(discountAmount)}
+                </span>
+              </div>
+            )}
+            {effectiveLoyaltyDiscount > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-yellow-400">Points fidélité</span>
+                <span className="text-yellow-400">
+                  -{formatPrice(effectiveLoyaltyDiscount)}
                 </span>
               </div>
             )}

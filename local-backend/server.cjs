@@ -49,6 +49,19 @@ process.on("SIGTERM", async () => {
 // Middleware
 app.use(cors());
 app.use(express.json());
+// === SERVIR LE FRONTEND EN PRODUCTION ===
+if (process.env.NODE_ENV === 'production') {
+  const buildPath = path.join(__dirname, '../dist');
+  app.use(express.static(buildPath));
+
+  // Toutes les routes non-API retournent index.html (SPA support)
+  app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api/')) {
+      res.sendFile(path.join(buildPath, 'index.html'));
+    }
+  });
+}
+
 
 // Initialize database connection pool
 async function initDatabase() {
@@ -58,10 +71,166 @@ async function initDatabase() {
     const connection = await pool.getConnection();
     console.log("Connected to TiDB Cloud successfully!");
     connection.release();
+
+    // Run additive migrations for new feature tables
+    await runMigrations();
+
     return true;
   } catch (error) {
     console.error("Failed to connect to TiDB:", error.message);
     process.exit(1);
+  }
+}
+
+async function runMigrations() {
+  // Use pool.query() instead of pool.execute() for DDL statements —
+  // mysql2's execute() uses prepared statements which TiDB/MySQL may
+  // not support for CREATE TABLE / ALTER TABLE.
+  // Each migration is wrapped in its own try/catch so one failure
+  // does not block the rest.
+  const migrations = [
+    {
+      name: "notifications",
+      sql: `CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        user_id INTEGER,
+        type VARCHAR(50) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        reference_type VARCHAR(50),
+        reference_id INTEGER,
+        is_read TINYINT NOT NULL DEFAULT 0,
+        created_at INTEGER,
+        INDEX idx_notifications_user_id (user_id),
+        INDEX idx_notifications_is_read (is_read),
+        INDEX idx_notifications_created_at (created_at)
+      )`,
+    },
+    {
+      name: "suppliers",
+      sql: `CREATE TABLE IF NOT EXISTS suppliers (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        name VARCHAR(255) NOT NULL,
+        phone VARCHAR(100),
+        email VARCHAR(255),
+        address TEXT,
+        notes TEXT,
+        is_active TINYINT NOT NULL DEFAULT 1,
+        created_at INTEGER,
+        updated_at INTEGER,
+        INDEX idx_suppliers_is_active (is_active)
+      )`,
+    },
+    {
+      name: "purchase_orders",
+      sql: `CREATE TABLE IF NOT EXISTS purchase_orders (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        order_number VARCHAR(50) NOT NULL UNIQUE,
+        supplier_id INTEGER NOT NULL,
+        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+        total_amount INTEGER NOT NULL DEFAULT 0,
+        notes TEXT,
+        ordered_at INTEGER,
+        received_at INTEGER,
+        created_by VARCHAR(100) NOT NULL,
+        created_at INTEGER,
+        updated_at INTEGER,
+        INDEX idx_purchase_orders_supplier_id (supplier_id),
+        INDEX idx_purchase_orders_status (status),
+        INDEX idx_purchase_orders_ordered_at (ordered_at)
+      )`,
+    },
+    {
+      name: "purchase_order_items",
+      sql: `CREATE TABLE IF NOT EXISTS purchase_order_items (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        purchase_order_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        quantity_ordered INTEGER NOT NULL,
+        quantity_received INTEGER NOT NULL DEFAULT 0,
+        unit_price INTEGER NOT NULL,
+        subtotal INTEGER NOT NULL,
+        INDEX idx_purchase_order_items_order_id (purchase_order_id)
+      )`,
+    },
+    {
+      name: "loyalty_transactions",
+      sql: `CREATE TABLE IF NOT EXISTS loyalty_transactions (
+        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+        customer_id INTEGER NOT NULL,
+        sale_id INTEGER,
+        points INTEGER NOT NULL,
+        type VARCHAR(50) NOT NULL,
+        description TEXT,
+        created_at INTEGER,
+        INDEX idx_loyalty_transactions_customer_id (customer_id),
+        INDEX idx_loyalty_transactions_sale_id (sale_id)
+      )`,
+    },
+    {
+      name: "app_config",
+      sql: `CREATE TABLE IF NOT EXISTS app_config (
+        config_key VARCHAR(100) PRIMARY KEY,
+        config_value TEXT NOT NULL
+      )`,
+    },
+  ];
+
+  let failedCount = 0;
+  for (const migration of migrations) {
+    try {
+      await pool.query(migration.sql);
+      console.log(`Migration OK: ${migration.name}`);
+    } catch (error) {
+      failedCount++;
+      console.error(`Migration FAILED [${migration.name}]:`, error.message);
+    }
+  }
+
+  // T009: Add loyalty_points column to customers table
+  try {
+    await pool.query(`
+      ALTER TABLE customers ADD COLUMN loyalty_points INTEGER NOT NULL DEFAULT 0
+    `);
+    console.log("Migration OK: customers.loyalty_points column added");
+  } catch (err) {
+    if (err.message.includes("Duplicate column")) {
+      console.log("Migration OK: customers.loyalty_points column already exists");
+    } else {
+      failedCount++;
+      console.error("Migration FAILED [customers.loyalty_points]:", err.message);
+    }
+  }
+
+  // T010: Change created_by from INTEGER to VARCHAR(100) for UUID support
+  try {
+    await pool.query(`
+      ALTER TABLE purchase_orders MODIFY COLUMN created_by VARCHAR(100) NOT NULL
+    `);
+    console.log("Migration OK: purchase_orders.created_by changed to VARCHAR(100)");
+  } catch (err) {
+    if (err.message.includes("Duplicate column") || err.message.includes("doesn't exist")) {
+      console.log("Migration OK: purchase_orders.created_by already VARCHAR or table doesn't exist yet");
+    } else {
+      failedCount++;
+      console.error("Migration FAILED [purchase_orders.created_by]:", err.message);
+    }
+  }
+
+  // Seed default loyalty settings if not present
+  try {
+    await pool.query(`
+      INSERT IGNORE INTO app_config (config_key, config_value)
+      VALUES ('loyalty_settings', '{"enabled":true,"pointsPerUnit":1,"pointsToCurrency":100}')
+    `);
+  } catch (err) {
+    // safe to ignore — app_config table may have failed
+  }
+
+  if (failedCount > 0) {
+    console.error(`Database migrations: ${failedCount} migration(s) failed — check errors above`);
+  } else {
+    console.log("Database migrations completed successfully");
   }
 }
 
@@ -957,6 +1126,74 @@ app.post("/api/sales", async (req, res) => {
       );
     }
 
+    // Loyalty points: redeem if requested (US4)
+    const loyaltyPointsUsed = req.body.loyaltyPointsUsed || 0;
+    if (loyaltyPointsUsed > 0 && customerId) {
+      try {
+        await pool.execute(
+          "UPDATE customers SET loyalty_points = loyalty_points - ? WHERE id = ?",
+          [loyaltyPointsUsed, customerId],
+        );
+        await pool.execute(
+          "INSERT INTO loyalty_transactions (customer_id, sale_id, points, type, description, created_at) VALUES (?, ?, ?, 'redeem', ?, ?)",
+          [
+            customerId,
+            saleId,
+            -loyaltyPointsUsed,
+            `Remise fidélité — ${loyaltyPointsUsed} points utilisés`,
+            now,
+          ],
+        );
+      } catch (e) {
+        console.error("Loyalty redeem error:", e.message);
+      }
+    }
+
+    // Loyalty points: earn (US4)
+    if (customerId && finalTotal > 0) {
+      try {
+        const pointsEarned = Math.floor(finalTotal / 100); // 1 point per monetary unit (finalTotal is in centimes)
+        await pool.execute(
+          "UPDATE customers SET loyalty_points = loyalty_points + ? WHERE id = ?",
+          [pointsEarned, customerId],
+        );
+        await pool.execute(
+          "INSERT INTO loyalty_transactions (customer_id, sale_id, points, type, description, created_at) VALUES (?, ?, ?, 'earn', ?, ?)",
+          [
+            customerId,
+            saleId,
+            pointsEarned,
+            `Achat #${saleId} — ${pointsEarned} points gagnés`,
+            now,
+          ],
+        );
+      } catch (e) {
+        console.error("Loyalty earn error:", e.message);
+      }
+    }
+
+    // Notifications: check low stock after sale (US2)
+    try {
+      for (const item of items) {
+        const [prods] = await pool.execute(
+          "SELECT id, name, stock, alert_threshold FROM products WHERE id = ?",
+          [item.productId],
+        );
+        if (prods.length > 0 && prods[0].stock <= prods[0].alert_threshold) {
+          await pool.execute(
+            "INSERT INTO notifications (user_id, type, title, message, reference_type, reference_id, created_at) VALUES (NULL, 'stock_low', 'Stock bas', ?, 'product', ?, ?)",
+            [
+              `Le produit '${prods[0].name}' n'a plus que ${prods[0].stock} unités en stock`,
+              prods[0].id,
+              now,
+            ],
+          );
+        }
+      }
+    } catch (e) {
+      console.error("Notification error:", e.message);
+    }
+
     const [rows] = await pool.execute("SELECT * FROM sales WHERE id = ?", [
       saleId,
     ]);
@@ -1010,6 +1247,34 @@ app.put("/api/sales/:id/cancel", async (req, res) => {
     await pool.execute("UPDATE sales SET status = 'cancelled' WHERE id = ?", [
       id,
     ]);
+
+    // Loyalty reversal on cancellation (US4)
+    try {
+      const [loyaltyTxs] = await pool.execute(
+        "SELECT * FROM loyalty_transactions WHERE sale_id = ?",
+        [id],
+      );
+      for (const tx of loyaltyTxs) {
+        const reversePoints = -tx.points;
+        await pool.execute(
+          "UPDATE customers SET loyalty_points = loyalty_points + ? WHERE id = ?",
+          [reversePoints, tx.customer_id],
+        );
+        const now = Math.floor(Date.now() / 1000);
+        await pool.execute(
+          "INSERT INTO loyalty_transactions (customer_id, sale_id, points, type, description, created_at) VALUES (?, ?, ?, 'cancel', ?, ?)",
+          [
+            tx.customer_id,
+            id,
+            reversePoints,
+            `Annulation vente #${id} — inversion de ${Math.abs(tx.points)} points`,
+            now,
+          ],
+        );
+      }
+    } catch (e) {
+      console.error("Loyalty cancel error:", e.message);
+    }
 
     const [updated] = await pool.execute("SELECT * FROM sales WHERE id = ?", [
       id,
@@ -1315,6 +1580,34 @@ app.patch("/api/repairs/:id/status", async (req, res) => {
         "UPDATE repairs SET status = ?, updated_at = ? WHERE id = ?",
         [status, now, id],
       );
+    }
+
+    // Notification: repair status change (US2)
+    try {
+      const statusLabels = {
+        new: "Nouvelle",
+        diagnostic: "En diagnostic",
+        repair: "En réparation",
+        delivered: "Livrée",
+      };
+      const [repairForNotif] = await pool.execute(
+        "SELECT r.*, c.name as customer_name FROM repairs r LEFT JOIN customers c ON r.customer_id = c.id WHERE r.id = ?",
+        [id],
+      );
+      if (repairForNotif.length > 0) {
+        const r = repairForNotif[0];
+        await pool.execute(
+          "INSERT INTO notifications (user_id, type, title, message, reference_type, reference_id, created_at) VALUES (NULL, 'repair_status', ?, ?, 'repair', ?, ?)",
+          [
+            `Réparation #${r.id}`,
+            `Réparation de ${r.customer_name || "Client"} (${r.device_brand} ${r.device_model}) — Statut: ${statusLabels[status] || status}`,
+            id,
+            now,
+          ],
+        );
+      }
+    } catch (e) {
+      console.error("Notification error:", e.message);
     }
 
     const [repairs] = await pool.execute("SELECT * FROM repairs WHERE id = ?", [
@@ -1929,6 +2222,1062 @@ app.delete("/api/admin/device-models/:id", async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error("[API] DELETE /api/admin/device-models/:id - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ===========================================
+// RECEIPT & TICKET ENDPOINTS (US1)
+// ===========================================
+
+app.get("/api/public/sales/:id/receipt", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [sales] = await pool.execute("SELECT * FROM sales WHERE id = ?", [
+      id,
+    ]);
+    if (sales.length === 0)
+      return res.status(404).json({ error: "Vente introuvable" });
+    const sale = sales[0];
+
+    const [items] = await pool.execute(
+      `SELECT si.quantity, si.unit_price, si.subtotal, p.name AS product_name
+       FROM sale_items si LEFT JOIN products p ON si.product_id = p.id
+       WHERE si.sale_id = ?`,
+      [id],
+    );
+
+    let customer = null;
+    if (sale.customer_id) {
+      const [customers] = await pool.execute(
+        "SELECT name, phone FROM customers WHERE id = ?",
+        [sale.customer_id],
+      );
+      if (customers.length > 0) customer = customers[0];
+    }
+
+    let sellerName = "Vendeur";
+    if (sale.user_id) {
+      const [users] = await pool.execute(
+        "SELECT name FROM users WHERE id = ?",
+        [sale.user_id],
+      );
+      if (users.length > 0) sellerName = users[0].name;
+    }
+
+    res.json({
+      data: {
+        sale: {
+          id: sale.id,
+          total: sale.total,
+          discount: sale.discount,
+          paymentMethod: sale.payment_method,
+          status: sale.status,
+          createdAt: sale.created_at,
+        },
+        items: items.map((i) => ({
+          productName: i.product_name || "Produit",
+          quantity: i.quantity,
+          unitPrice: i.unit_price,
+          subtotal: i.subtotal,
+        })),
+        customer,
+        store: { name: "Aroua Store", address: "", phone: "", email: "" },
+        seller: { name: sellerName },
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/sales/:id/receipt - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/repairs/:id/ticket", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [repairs] = await pool.execute("SELECT * FROM repairs WHERE id = ?", [
+      id,
+    ]);
+    if (repairs.length === 0)
+      return res.status(404).json({ error: "Réparation introuvable" });
+    const repair = repairs[0];
+
+    const [customers] = await pool.execute(
+      "SELECT name, phone FROM customers WHERE id = ?",
+      [repair.customer_id],
+    );
+    const customer =
+      customers.length > 0 ? customers[0] : { name: "Client", phone: "" };
+
+    let technician = null;
+    if (repair.technician_id) {
+      const [users] = await pool.execute(
+        "SELECT name FROM users WHERE id = ?",
+        [repair.technician_id],
+      );
+      if (users.length > 0) technician = { name: users[0].name };
+    }
+
+    res.json({
+      data: {
+        repair: {
+          id: repair.id,
+          deviceBrand: repair.device_brand,
+          deviceModel: repair.device_model,
+          deviceVariant: repair.device_variant,
+          issueDescription: repair.issue_description,
+          estimatedCost: repair.estimated_cost,
+          status: repair.status,
+          promisedDate: repair.promised_date,
+          createdAt: repair.created_at,
+        },
+        customer,
+        technician,
+        store: { name: "Aroua Store", address: "", phone: "" },
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/repairs/:id/ticket - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ===========================================
+// NOTIFICATION ENDPOINTS (US2)
+// ===========================================
+
+app.get("/api/notifications", async (req, res) => {
+  try {
+    const user = getCurrentUser(req);
+    const unreadOnly = req.query.unread_only === "true";
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+
+    let sql =
+      "SELECT * FROM notifications WHERE (user_id IS NULL OR user_id = ?)";
+    const params = [user.id];
+    if (unreadOnly) {
+      sql += " AND is_read = 0";
+    }
+    sql += ` ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+
+    const [rows] = await pool.query(sql, params);
+    const [countRows] = await pool.execute(
+      "SELECT COUNT(*) as cnt FROM notifications WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0",
+      [user.id],
+    );
+
+    res.json({
+      data: {
+        notifications: rows.map((n) => ({
+          id: n.id,
+          type: n.type,
+          title: n.title,
+          message: n.message,
+          referenceType: n.reference_type,
+          referenceId: n.reference_id,
+          isRead: !!n.is_read,
+          createdAt: n.created_at,
+        })),
+        unreadCount: countRows[0].cnt,
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/notifications - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/notifications/unread-count", async (req, res) => {
+  try {
+    const user = getCurrentUser(req);
+    const [rows] = await pool.execute(
+      "SELECT COUNT(*) as cnt FROM notifications WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0",
+      [user.id],
+    );
+    res.json({ data: { count: rows[0].cnt } });
+  } catch (error) {
+    console.error("[API] GET /api/notifications/unread-count - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.put("/api/notifications/:id/read", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", [
+      id,
+    ]);
+    res.json({ data: { id: parseInt(id), isRead: true } });
+  } catch (error) {
+    console.error("[API] PUT /api/notifications/:id/read - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.put("/api/notifications/read-all", async (req, res) => {
+  try {
+    const user = getCurrentUser(req);
+    const [result] = await pool.execute(
+      "UPDATE notifications SET is_read = 1 WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0",
+      [user.id],
+    );
+    res.json({ data: { updatedCount: result.affectedRows } });
+  } catch (error) {
+    console.error("[API] PUT /api/notifications/read-all - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ===========================================
+// SUPPLIER ENDPOINTS (US3)
+// ===========================================
+
+app.get("/api/public/suppliers", async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      "SELECT * FROM suppliers WHERE is_active = 1 ORDER BY name",
+    );
+    res.json({
+      data: rows.map((s) => ({
+        id: s.id,
+        name: s.name,
+        phone: s.phone,
+        email: s.email,
+        address: s.address,
+        notes: s.notes,
+        isActive: !!s.is_active,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/suppliers - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/suppliers/:id", async (req, res) => {
+  try {
+    const [rows] = await pool.execute("SELECT * FROM suppliers WHERE id = ?", [
+      req.params.id,
+    ]);
+    if (rows.length === 0)
+      return res.status(404).json({ error: "Fournisseur introuvable" });
+    const s = rows[0];
+    res.json({
+      data: {
+        id: s.id,
+        name: s.name,
+        phone: s.phone,
+        email: s.email,
+        address: s.address,
+        notes: s.notes,
+        isActive: !!s.is_active,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/suppliers/:id - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.post("/api/admin/suppliers", async (req, res) => {
+  try {
+    const { name, phone, email, address, notes } = req.body;
+    if (!name) return res.status(400).json({ error: "Le nom est requis" });
+    const now = Math.floor(Date.now() / 1000);
+    const [result] = await pool.execute(
+      "INSERT INTO suppliers (name, phone, email, address, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [
+        name,
+        phone || null,
+        email || null,
+        address || null,
+        notes || null,
+        now,
+        now,
+      ],
+    );
+    const [rows] = await pool.execute("SELECT * FROM suppliers WHERE id = ?", [
+      result.insertId,
+    ]);
+    const s = rows[0];
+    res.status(201).json({
+      data: {
+        id: s.id,
+        name: s.name,
+        phone: s.phone,
+        email: s.email,
+        address: s.address,
+        notes: s.notes,
+        isActive: !!s.is_active,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error("[API] POST /api/admin/suppliers - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.put("/api/admin/suppliers/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, phone, email, address, notes } = req.body;
+    const now = Math.floor(Date.now() / 1000);
+    const fields = [];
+    const values = [];
+    if (name !== undefined) {
+      fields.push("name = ?");
+      values.push(name);
+    }
+    if (phone !== undefined) {
+      fields.push("phone = ?");
+      values.push(phone);
+    }
+    if (email !== undefined) {
+      fields.push("email = ?");
+      values.push(email);
+    }
+    if (address !== undefined) {
+      fields.push("address = ?");
+      values.push(address);
+    }
+    if (notes !== undefined) {
+      fields.push("notes = ?");
+      values.push(notes);
+    }
+    fields.push("updated_at = ?");
+    values.push(now);
+    values.push(id);
+    await pool.execute(
+      `UPDATE suppliers SET ${fields.join(", ")} WHERE id = ?`,
+      values,
+    );
+    const [rows] = await pool.execute("SELECT * FROM suppliers WHERE id = ?", [
+      id,
+    ]);
+    const s = rows[0];
+    res.json({
+      data: {
+        id: s.id,
+        name: s.name,
+        phone: s.phone,
+        email: s.email,
+        address: s.address,
+        notes: s.notes,
+        isActive: !!s.is_active,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error("[API] PUT /api/admin/suppliers/:id - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.delete("/api/admin/suppliers/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [pending] = await pool.execute(
+      "SELECT COUNT(*) as cnt FROM purchase_orders WHERE supplier_id = ? AND status IN ('pending', 'partially_received')",
+      [id],
+    );
+    if (pending[0].cnt > 0)
+      return res.status(409).json({
+        error:
+          "Ce fournisseur a des commandes en cours. Veuillez d'abord les clôturer.",
+      });
+    await pool.execute("UPDATE suppliers SET is_active = 0 WHERE id = ?", [id]);
+    res.json({ data: { success: true } });
+  } catch (error) {
+    console.error("[API] DELETE /api/admin/suppliers/:id - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ===========================================
+// PURCHASE ORDER ENDPOINTS (US3)
+// ===========================================
+
+app.get("/api/public/purchase-orders", async (req, res) => {
+  try {
+    const { status, supplier_id, limit: lim } = req.query;
+    let sql =
+      "SELECT po.*, s.name as supplier_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id WHERE 1=1";
+    const params = [];
+    if (status) {
+      sql += " AND po.status = ?";
+      params.push(status);
+    }
+    if (supplier_id) {
+      sql += " AND po.supplier_id = ?";
+      params.push(supplier_id);
+    }
+    const poLimit = Math.min(Math.max(parseInt(lim) || 50, 1), 200);
+    sql += ` ORDER BY po.created_at DESC LIMIT ${poLimit}`;
+    const [rows] = await pool.query(sql, params);
+    res.json({
+      data: rows.map((po) => ({
+        id: po.id,
+        orderNumber: po.order_number,
+        supplierId: po.supplier_id,
+        supplierName: po.supplier_name,
+        status: po.status,
+        totalAmount: po.total_amount,
+        notes: po.notes,
+        orderedAt: po.ordered_at,
+        receivedAt: po.received_at,
+        createdBy: po.created_by,
+        createdAt: po.created_at,
+      })),
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/purchase-orders - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/purchase-orders/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [pos] = await pool.execute(
+      "SELECT po.*, s.name as supplier_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id WHERE po.id = ?",
+      [id],
+    );
+    if (pos.length === 0)
+      return res.status(404).json({ error: "Bon de commande introuvable" });
+    const po = pos[0];
+    const [items] = await pool.execute(
+      `SELECT poi.*, p.name as product_name, p.sku as product_sku
+       FROM purchase_order_items poi LEFT JOIN products p ON poi.product_id = p.id
+       WHERE poi.purchase_order_id = ?`,
+      [id],
+    );
+    res.json({
+      data: {
+        id: po.id,
+        orderNumber: po.order_number,
+        supplierId: po.supplier_id,
+        supplierName: po.supplier_name,
+        status: po.status,
+        totalAmount: po.total_amount,
+        notes: po.notes,
+        orderedAt: po.ordered_at,
+        receivedAt: po.received_at,
+        createdBy: po.created_by,
+        createdAt: po.created_at,
+        items: items.map((i) => ({
+          id: i.id,
+          productId: i.product_id,
+          productName: i.product_name,
+          productSku: i.product_sku,
+          quantityOrdered: i.quantity_ordered,
+          quantityReceived: i.quantity_received,
+          unitPrice: i.unit_price,
+          subtotal: i.subtotal,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/purchase-orders/:id - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.post("/api/admin/purchase-orders", async (req, res) => {
+  try {
+    const { supplierId, notes, items } = req.body;
+    if (!supplierId || !items || items.length === 0)
+      return res.status(400).json({ error: "Fournisseur et articles requis" });
+    const now = Math.floor(Date.now() / 1000);
+
+    // Generate order number using MAX(id) to avoid race conditions
+    const [maxRows] = await pool.execute(
+      "SELECT COALESCE(MAX(id), 0) as max_id FROM purchase_orders",
+    );
+    const num = (maxRows[0].max_id || 0) + 1;
+    const year = new Date().getFullYear();
+    const orderNumber = `PO-${year}-${String(num).padStart(4, "0")}`;
+
+    let totalAmount = 0;
+    const itemsWithPrices = [];
+    for (const item of items) {
+      const [products] = await pool.execute(
+        "SELECT price_purchase FROM products WHERE id = ?",
+        [item.productId],
+      );
+      const unitPrice = products.length > 0 ? products[0].price_purchase : 0;
+      const subtotal = unitPrice * item.quantityOrdered;
+      totalAmount += subtotal;
+      itemsWithPrices.push({ ...item, unitPrice, subtotal });
+    }
+
+    const user = getCurrentUser(req);
+    const [result] = await pool.execute(
+      "INSERT INTO purchase_orders (order_number, supplier_id, total_amount, notes, created_by, ordered_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        orderNumber,
+        supplierId,
+        totalAmount,
+        notes || null,
+        user.id,
+        now,
+        now,
+        now,
+      ],
+    );
+    const poId = result.insertId;
+
+    for (const item of itemsWithPrices) {
+      await pool.execute(
+        "INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity_ordered, unit_price, subtotal) VALUES (?, ?, ?, ?, ?)",
+        [
+          poId,
+          item.productId,
+          item.quantityOrdered,
+          item.unitPrice,
+          item.subtotal,
+        ],
+      );
+    }
+
+    const [pos] = await pool.execute(
+      "SELECT * FROM purchase_orders WHERE id = ?",
+      [poId],
+    );
+    res.status(201).json({
+      data: {
+        id: pos[0].id,
+        orderNumber: pos[0].order_number,
+        status: pos[0].status,
+        totalAmount: pos[0].total_amount,
+      },
+    });
+  } catch (error) {
+    console.error("[API] POST /api/admin/purchase-orders - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.put("/api/admin/purchase-orders/:id/receive", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { items } = req.body;
+    const [pos] = await pool.execute(
+      "SELECT * FROM purchase_orders WHERE id = ?",
+      [id],
+    );
+    if (pos.length === 0)
+      return res.status(404).json({ error: "Bon de commande introuvable" });
+    if (pos[0].status === "received" || pos[0].status === "cancelled") {
+      return res
+        .status(400)
+        .json({ error: "Cette commande ne peut plus être modifiée" });
+    }
+    const now = Math.floor(Date.now() / 1000);
+
+    for (const item of items) {
+      await pool.execute(
+        "UPDATE purchase_order_items SET quantity_received = quantity_received + ? WHERE id = ?",
+        [item.quantityReceived, item.itemId],
+      );
+      // Atomically increment product stock
+      const [poiRows] = await pool.execute(
+        "SELECT product_id FROM purchase_order_items WHERE id = ?",
+        [item.itemId],
+      );
+      if (poiRows.length > 0) {
+        await pool.execute(
+          "UPDATE products SET stock = stock + ? WHERE id = ?",
+          [item.quantityReceived, poiRows[0].product_id],
+        );
+      }
+    }
+
+    // Determine new status
+    const [allItems] = await pool.execute(
+      "SELECT * FROM purchase_order_items WHERE purchase_order_id = ?",
+      [id],
+    );
+    const allReceived = allItems.every(
+      (i) => i.quantity_received >= i.quantity_ordered,
+    );
+    const someReceived = allItems.some((i) => i.quantity_received > 0);
+    const newStatus = allReceived
+      ? "received"
+      : someReceived
+        ? "partially_received"
+        : "pending";
+    const receivedAt = allReceived ? now : null;
+
+    await pool.execute(
+      "UPDATE purchase_orders SET status = ?, received_at = ?, updated_at = ? WHERE id = ?",
+      [newStatus, receivedAt, now, id],
+    );
+    const [updated] = await pool.execute(
+      "SELECT * FROM purchase_orders WHERE id = ?",
+      [id],
+    );
+    res.json({
+      data: {
+        id: updated[0].id,
+        orderNumber: updated[0].order_number,
+        status: updated[0].status,
+        totalAmount: updated[0].total_amount,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "[API] PUT /api/admin/purchase-orders/:id/receive - error:",
+      error,
+    );
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.put("/api/admin/purchase-orders/:id/cancel", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [pos] = await pool.execute(
+      "SELECT * FROM purchase_orders WHERE id = ?",
+      [id],
+    );
+    if (pos.length === 0)
+      return res.status(404).json({ error: "Bon de commande introuvable" });
+    if (pos[0].status === "received")
+      return res
+        .status(400)
+        .json({ error: "Cette commande ne peut plus être annulée" });
+    const now = Math.floor(Date.now() / 1000);
+    await pool.execute(
+      "UPDATE purchase_orders SET status = 'cancelled', updated_at = ? WHERE id = ?",
+      [now, id],
+    );
+    res.json({ data: { id: parseInt(id), status: "cancelled" } });
+  } catch (error) {
+    console.error(
+      "[API] PUT /api/admin/purchase-orders/:id/cancel - error:",
+      error,
+    );
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ===========================================
+// LOYALTY ENDPOINTS (US4)
+// ===========================================
+
+app.get("/api/public/customers/:id/loyalty", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [customers] = await pool.execute(
+      "SELECT loyalty_points FROM customers WHERE id = ?",
+      [id],
+    );
+    if (customers.length === 0)
+      return res.status(404).json({ error: "Client introuvable" });
+    const loyaltyPoints = customers[0].loyalty_points || 0;
+    const pointsToCurrency = 100; // points needed per 1 monetary unit
+    // equivalentDiscount in centimes (matching the rest of the system's integer arithmetic)
+    const equivalentDiscount =
+      Math.floor(loyaltyPoints / pointsToCurrency) * 100;
+
+    const [transactions] = await pool.execute(
+      "SELECT * FROM loyalty_transactions WHERE customer_id = ? ORDER BY created_at DESC LIMIT 20",
+      [id],
+    );
+    res.json({
+      data: {
+        customerId: parseInt(id),
+        loyaltyPoints,
+        equivalentDiscount,
+        recentTransactions: transactions.map((t) => ({
+          id: t.id,
+          points: t.points,
+          type: t.type,
+          description: t.description,
+          saleId: t.sale_id,
+          createdAt: t.created_at,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error(
+      "[API] GET /api/public/customers/:id/loyalty - error:",
+      error,
+    );
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/loyalty/settings", async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      "SELECT config_value FROM app_config WHERE config_key = 'loyalty_settings'",
+    );
+    if (rows.length > 0) {
+      res.json({ data: JSON.parse(rows[0].config_value) });
+    } else {
+      res.json({
+        data: { enabled: true, pointsPerUnit: 1, pointsToCurrency: 100 },
+      });
+    }
+  } catch (error) {
+    console.error("[API] GET /api/public/loyalty/settings - error:", error);
+    res.json({
+      data: { enabled: true, pointsPerUnit: 1, pointsToCurrency: 100 },
+    });
+  }
+});
+
+app.put("/api/admin/loyalty/settings", async (req, res) => {
+  try {
+    const { enabled, pointsPerUnit, pointsToCurrency } = req.body;
+    const settings = {
+      enabled: enabled ?? true,
+      pointsPerUnit: pointsPerUnit ?? 1,
+      pointsToCurrency: pointsToCurrency ?? 100,
+    };
+    await pool.execute(
+      "REPLACE INTO app_config (config_key, config_value) VALUES ('loyalty_settings', ?)",
+      [JSON.stringify(settings)],
+    );
+    res.json({ data: settings });
+  } catch (error) {
+    console.error("[API] PUT /api/admin/loyalty/settings - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ===========================================
+// REPORT ENDPOINTS (US5)
+// ===========================================
+
+app.get("/api/public/reports/sales", async (req, res) => {
+  try {
+    const from = parseInt(req.query.from);
+    const to = parseInt(req.query.to);
+    if (!from || !to)
+      return res.status(400).json({ error: "Paramètres from et to requis" });
+
+    const [sales] = await pool.execute(
+      "SELECT s.*, c.name as customer_name, u.name as seller_name FROM sales s LEFT JOIN customers c ON s.customer_id = c.id LEFT JOIN users u ON s.user_id = u.id WHERE s.created_at >= ? AND s.created_at <= ? ORDER BY s.created_at DESC",
+      [from, to],
+    );
+
+    let totalRevenue = 0,
+      totalDiscount = 0,
+      totalCost = 0;
+    const byPaymentMethod = {};
+    const productSales = {};
+    const salesByDayMap = {};
+
+    const salesWithItems = [];
+    for (const sale of sales) {
+      const [items] = await pool.execute(
+        "SELECT si.*, p.name as product_name, p.sku, p.price_purchase FROM sale_items si LEFT JOIN products p ON si.product_id = p.id WHERE si.sale_id = ?",
+        [sale.id],
+      );
+
+      totalRevenue += sale.total;
+      totalDiscount += sale.discount;
+
+      const method = sale.payment_method || "cash";
+      if (!byPaymentMethod[method])
+        byPaymentMethod[method] = { count: 0, total: 0 };
+      byPaymentMethod[method].count++;
+      byPaymentMethod[method].total += sale.total;
+
+      const day = new Date(sale.created_at * 1000).toISOString().split("T")[0];
+      if (!salesByDayMap[day])
+        salesByDayMap[day] = { date: day, count: 0, revenue: 0 };
+      salesByDayMap[day].count++;
+      salesByDayMap[day].revenue += sale.total;
+
+      for (const item of items) {
+        totalCost += (item.price_purchase || 0) * item.quantity;
+        const pid = item.product_id;
+        if (!productSales[pid])
+          productSales[pid] = {
+            productId: pid,
+            productName: item.product_name,
+            sku: item.sku || "",
+            quantitySold: 0,
+            revenue: 0,
+          };
+        productSales[pid].quantitySold += item.quantity;
+        productSales[pid].revenue += item.subtotal;
+      }
+
+      salesWithItems.push({
+        id: sale.id,
+        customerName: sale.customer_name || null,
+        total: sale.total,
+        discount: sale.discount,
+        paymentMethod: sale.payment_method,
+        sellerName: sale.seller_name || "Vendeur",
+        createdAt: sale.created_at,
+        items: items.map((i) => ({
+          productName: i.product_name,
+          quantity: i.quantity,
+          unitPrice: i.unit_price,
+          subtotal: i.subtotal,
+        })),
+      });
+    }
+
+    const netRevenue = totalRevenue - totalDiscount;
+    const grossMargin = netRevenue - totalCost;
+    const marginPercentage =
+      netRevenue > 0 ? Math.round((grossMargin / netRevenue) * 10000) : 0;
+    const topProducts = Object.values(productSales)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+    res.json({
+      data: {
+        period: { from, to },
+        summary: {
+          totalSales: sales.length,
+          totalRevenue,
+          totalDiscount,
+          netRevenue,
+          averageTicket:
+            sales.length > 0 ? Math.round(netRevenue / sales.length) : 0,
+          totalCost,
+          grossMargin,
+          marginPercentage,
+        },
+        byPaymentMethod,
+        topProducts,
+        salesByDay: Object.values(salesByDayMap).sort((a, b) =>
+          a.date.localeCompare(b.date),
+        ),
+        sales: salesWithItems,
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/reports/sales - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/reports/inventory", async (req, res) => {
+  try {
+    const [products] = await pool.execute(
+      "SELECT * FROM products ORDER BY name",
+    );
+    let totalStockValue = 0,
+      totalRetailValue = 0,
+      lowStockCount = 0,
+      outOfStockCount = 0;
+    const activeProducts = products.filter((p) => p.is_active);
+    const byCategory = {};
+
+    const productList = products.map((p) => {
+      const stockValue = p.price_purchase * p.stock;
+      const retailValue = p.price_sale * p.stock;
+      totalStockValue += stockValue;
+      totalRetailValue += retailValue;
+      const isLowStock = p.stock <= p.alert_threshold && p.stock > 0;
+      if (isLowStock) lowStockCount++;
+      if (p.stock === 0) outOfStockCount++;
+
+      const cat = p.category || "other";
+      if (!byCategory[cat]) byCategory[cat] = { count: 0, stockValue: 0 };
+      byCategory[cat].count++;
+      byCategory[cat].stockValue += stockValue;
+
+      return {
+        id: p.id,
+        sku: p.sku,
+        name: p.name,
+        category: p.category,
+        brand: p.brand,
+        stock: p.stock,
+        alertThreshold: p.alert_threshold,
+        pricePurchase: p.price_purchase,
+        priceSale: p.price_sale,
+        stockValue,
+        retailValue,
+        isLowStock,
+      };
+    });
+
+    const lowStockProducts = productList
+      .filter((p) => p.isLowStock)
+      .map((p) => ({
+        id: p.id,
+        sku: p.sku,
+        name: p.name,
+        stock: p.stock,
+        alertThreshold: p.alertThreshold,
+      }));
+
+    res.json({
+      data: {
+        summary: {
+          totalProducts: products.length,
+          activeProducts: activeProducts.length,
+          totalStockValue,
+          totalRetailValue,
+          lowStockCount,
+          outOfStockCount,
+        },
+        byCategory,
+        products: productList,
+        lowStockProducts,
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/reports/inventory - error:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/reports/cash-sessions", async (req, res) => {
+  try {
+    const from = parseInt(req.query.from);
+    const to = parseInt(req.query.to);
+    if (isNaN(from) || isNaN(to) || from <= 0 || to <= 0)
+      return res.status(400).json({ error: "Paramètres from et to requis" });
+
+    const [sessions] = await pool.execute(
+      "SELECT cs.*, u.name as user_name FROM cash_sessions cs LEFT JOIN users u ON cs.user_id = u.id WHERE cs.opened_at >= ? AND cs.opened_at <= ? ORDER BY cs.opened_at DESC",
+      [from, to],
+    );
+
+    let totalOpening = 0,
+      totalClosing = 0,
+      totalExpected = 0,
+      totalDifference = 0,
+      discrepancies = 0;
+    const sessionList = sessions.map((s) => {
+      totalOpening += s.opening_amount || 0;
+      totalClosing += s.closing_amount || 0;
+      totalExpected += s.expected_amount || 0;
+      const diff = s.difference || 0;
+      totalDifference += diff;
+      if (diff !== 0) discrepancies++;
+
+      return {
+        id: s.id,
+        userName: s.user_name || "Utilisateur",
+        openingAmount: s.opening_amount,
+        closingAmount: s.closing_amount,
+        expectedAmount: s.expected_amount,
+        difference: s.difference,
+        openedAt: s.opened_at,
+        closedAt: s.closed_at,
+        notes: s.notes,
+      };
+    });
+
+    res.json({
+      data: {
+        period: { from, to },
+        summary: {
+          totalSessions: sessions.length,
+          totalOpeningAmount: totalOpening,
+          totalClosingAmount: totalClosing,
+          totalExpectedAmount: totalExpected,
+          totalDifference,
+          sessionsWithDiscrepancy: discrepancies,
+        },
+        sessions: sessionList,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "[API] GET /api/public/reports/cash-sessions - error:",
+      error,
+    );
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/public/reports/repairs", async (req, res) => {
+  try {
+    const from = parseInt(req.query.from);
+    const to = parseInt(req.query.to);
+    if (!from || !to)
+      return res.status(400).json({ error: "Paramètres from et to requis" });
+
+    const [repairs] = await pool.execute(
+      "SELECT r.*, c.name as customer_name, u.name as technician_name FROM repairs r LEFT JOIN customers c ON r.customer_id = c.id LEFT JOIN users u ON r.technician_id = u.id WHERE r.created_at >= ? AND r.created_at <= ? ORDER BY r.created_at DESC",
+      [from, to],
+    );
+
+    let totalRevenue = 0;
+    const byStatus = {};
+    const byTechMap = {};
+    let totalDays = 0,
+      completedCount = 0;
+
+    const repairList = repairs.map((r) => {
+      const cost = r.final_cost || r.estimated_cost || 0;
+      if (r.status === "delivered") totalRevenue += cost;
+      byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+
+      if (r.technician_id) {
+        if (!byTechMap[r.technician_id])
+          byTechMap[r.technician_id] = {
+            technicianId: r.technician_id,
+            technicianName: r.technician_name || "Technicien",
+            repairCount: 0,
+            totalRevenue: 0,
+          };
+        byTechMap[r.technician_id].repairCount++;
+        if (r.status === "delivered")
+          byTechMap[r.technician_id].totalRevenue += cost;
+      }
+
+      if (r.delivered_at && r.created_at) {
+        totalDays += (r.delivered_at - r.created_at) / 86400;
+        completedCount++;
+      }
+
+      return {
+        id: r.id,
+        customerName: r.customer_name,
+        deviceBrand: r.device_brand,
+        deviceModel: r.device_model,
+        issueDescription: r.issue_description,
+        status: r.status,
+        estimatedCost: r.estimated_cost,
+        finalCost: r.final_cost,
+        technicianName: r.technician_name,
+        createdAt: r.created_at,
+        deliveredAt: r.delivered_at,
+      };
+    });
+
+    res.json({
+      data: {
+        period: { from, to },
+        summary: {
+          totalRepairs: repairs.length,
+          totalRevenue,
+          averageCost:
+            repairs.length > 0
+              ? Math.round(totalRevenue / Math.max(completedCount, 1))
+              : 0,
+          averageCompletionDays:
+            completedCount > 0 ? Math.round(totalDays / completedCount) : 0,
+        },
+        byStatus,
+        byTechnician: Object.values(byTechMap),
+        repairs: repairList,
+      },
+    });
+  } catch (error) {
+    console.error("[API] GET /api/public/reports/repairs - error:", error);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
