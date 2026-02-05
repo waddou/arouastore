@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__acp__Bash",
+      "mcp__acp__Write",
+      "mcp__acp__Edit",
+      "WebFetch(domain:pingcap.github.io)",
+      "WebFetch(domain:korben.info)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}

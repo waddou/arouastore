@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "TiDB": {
+      "command": "npx",
+      "args": ["-y", "tidb-mcp-server"],
+      "env": {
+        "TIDB_HOST": "gateway01.eu-central-1.prod.aws.tidbcloud.com",
+        "TIDB_PORT": "4000",
+        "TIDB_USER": "2Kkkuv3PHyG2RBg.root",
+        "TIDB_PASS": "1fYFk5J50aTjVgcl",
+        "TIDB_DB": "POS"
+      }
+    },
+    "wake-mcp": {
+      "command": "wake-mcp"
+    }
