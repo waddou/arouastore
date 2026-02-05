@@ -43,33 +43,20 @@ const localFetch = async (path: string, options?: RequestInit) => {
   return res;
 };
 
-// Local user data
-const localUser = {
-  id: "JuL5vmdvmHbGggT0xUHJw3pMw5ZbqBUK",
-  email: "kuarigama@heure-salat.com",
-  name: "kuarigama",
-};
-
 // Fake client for compatibility with existing code
 export const client = {
   auth: {
-    user: localUser,
+    user: null,
     isLoading: false,
-    isAuthenticated: true,
+    isAuthenticated: false,
     signOut: async () => {
-      console.log("Logged out (local mode)");
+      console.log("Logged out");
       return Promise.resolve();
     },
     getSession: async () => {
-      // Return a fake session for local mode
-      return {
-        user: localUser,
-        accessToken: "local-token",
-      };
+      return null;
     },
     onAuthStateChange: (callback: (event: string, session: any) => void) => {
-      // Immediately call with current session
-      callback("SIGNED_IN", { user: localUser });
       // Return unsubscribe function
       return { unsubscribe: () => {} };
     },

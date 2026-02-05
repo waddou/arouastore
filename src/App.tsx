@@ -58,34 +58,24 @@ function App() {
   }, []);
 
   async function restoreSession() {
-    // Skip if user exists locally
-    if (useAuthStore.getState().user) {
-      setChecking(false);
-      return;
-    }
-
-    try {
-      // Local mode: auto-login with local user
-      const localUser = client.auth.user;
-      if (localUser) {
-        setUser({
-          id: localUser.id,
-          email: localUser.email,
-          name: localUser.name || "",
-        });
-
-        // Fetch user role from local backend
-        try {
-          const roleData = await api.getUserRole();
-          useAuthStore.getState().setUserRole(roleData.role);
-        } catch (e) {
-          // Default to admin for local mode
-          useAuthStore.getState().setUserRole("admin");
-        }
+    // Zustand persist already restores user from localStorage
+    // Only fetch role if user exists
+    const currentUser = useAuthStore.getState().user;
+    
+    if (currentUser) {
+      try {
+        // Fetch user role from backend to ensure it's up to date
+        const roleData = await api.getUserRole();
+        useAuthStore.getState().setUserRole(roleData.role);
+      } catch (e) {
+        console.error("Failed to fetch user role:", e);
+        // If role fetch fails, user might not be authenticated anymore
+        // Clear the session
+        useAuthStore.getState().reset();
       }
-    } finally {
-      setChecking(false);
     }
+    
+    setChecking(false);
   }
 
   // Show Loading while isChecking to prevent flicker
