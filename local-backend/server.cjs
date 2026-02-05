@@ -1594,28 +1594,72 @@ app.patch("/api/repairs/:id/status", async (req, res) => {
       return res.status(400).json({ error: "Statut invalide" });
     }
 
+    // Vérifier le statut actuel de la réparation
+    const [currentRepair] = await pool.execute(
+      "SELECT status, customer_id, estimated_cost FROM repairs WHERE id = ?",
+      [id],
+    );
+    
+    if (currentRepair.length === 0) {
+      return res.status(404).json({ error: "Réparation introuvable" });
+    }
+    
+    const previousStatus = currentRepair[0].status;
+
     if (status === "delivered") {
-      // Get repair details to update customer total_spent
-      const [repairRows] = await pool.execute(
-        "SELECT customer_id, estimated_cost FROM repairs WHERE id = ?",
+      // Passage à "delivered" : décrémenter le stock des composants
+      const [components] = await pool.execute(
+        "SELECT product_id, quantity FROM repair_components WHERE repair_id = ?",
         [id],
       );
+      
+      for (const component of components) {
+        await pool.execute(
+          "UPDATE products SET stock = stock - ? WHERE id = ?",
+          [component.quantity, component.product_id],
+        );
+      }
+      
       await pool.execute(
         "UPDATE repairs SET status = ?, updated_at = ?, delivered_at = ? WHERE id = ?",
         [status, now, now, id],
       );
+      
       // Update customer total_spent with repair cost
-      if (
-        repairRows.length > 0 &&
-        repairRows[0].customer_id &&
-        repairRows[0].estimated_cost
-      ) {
+      if (currentRepair[0].customer_id && currentRepair[0].estimated_cost) {
         await pool.execute(
           "UPDATE customers SET total_spent = COALESCE(total_spent, 0) + ? WHERE id = ?",
-          [repairRows[0].estimated_cost, repairRows[0].customer_id],
+          [currentRepair[0].estimated_cost, currentRepair[0].customer_id],
+        );
+      }
+    } else if (previousStatus === "delivered" && status !== "delivered") {
+      // Retour en arrière depuis "delivered" : ré-incrémenter le stock
+      const [components] = await pool.execute(
+        "SELECT product_id, quantity FROM repair_components WHERE repair_id = ?",
+        [id],
+      );
+      
+      for (const component of components) {
+        await pool.execute(
+          "UPDATE products SET stock = stock + ? WHERE id = ?",
+          [component.quantity, component.product_id],
+        );
+      }
+      
+      await pool.execute(
+        "UPDATE repairs SET status = ?, updated_at = ?, delivered_at = NULL WHERE id = ?",
+        [status, now, id],
+      );
+      
+      // Retirer le coût du total_spent du client
+      if (currentRepair[0].customer_id && currentRepair[0].estimated_cost) {
+        await pool.execute(
+          "UPDATE customers SET total_spent = COALESCE(total_spent, 0) - ? WHERE id = ?",
+          [currentRepair[0].estimated_cost, currentRepair[0].customer_id],
         );
       }
     } else {
+      // Changement de statut normal (pas de delivered impliqué)
       await pool.execute(
         "UPDATE repairs SET status = ?, updated_at = ? WHERE id = ?",
         [status, now, id],
