@@ -49,6 +49,20 @@ process.on("SIGTERM", async () => {
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Protéger toutes les routes /api/admin/* avec authentification admin
+app.use('/api/admin', async (req, res, next) => {
+  const user = getCurrentUser(req);
+  if (!user) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  if (!(await isAdmin(user.id))) {
+    return res.status(403).json({ error: "Accès non autorisé - droits admin requis" });
+  }
+  req.user = user;
+  next();
+});
+
 // === SERVIR LE FRONTEND EN PRODUCTION ===
 if (process.env.NODE_ENV === 'production') {
   const buildPath = path.join(__dirname, '../dist');
@@ -231,11 +245,21 @@ async function runMigrations() {
 // HELPER: Get current user from header (simplified auth)
 // ===========================================
 function getCurrentUser(req) {
-  const authUserId =
-    req.headers["x-auth-user-id"] || "JuL5vmdvmHbGggT0xUHJw3pMw5ZbqBUK";
-  const email = req.headers["x-auth-email"] || "kuarigama@heure-salat.com";
-  const name = req.headers["x-auth-name"] || "kuarigama";
-  return { id: authUserId, email, name };
+  const authUserId = req.headers["x-auth-user-id"];
+  const email = req.headers["x-auth-email"];
+  const name = req.headers["x-auth-name"];
+  
+  // En production, forcer l'authentification
+  if (process.env.NODE_ENV === 'production' && (!authUserId || !email)) {
+    return null;
+  }
+  
+  // En développement, utiliser des valeurs par défaut
+  return {
+    id: authUserId || "JuL5vmdvmHbGggT0xUHJw3pMw5ZbqBUK",
+    email: email || "kuarigama@heure-salat.com",
+    name: name || "kuarigama"
+  };
 }
 
 async function isAdmin(authUserId) {
@@ -244,6 +268,29 @@ async function isAdmin(authUserId) {
     [authUserId],
   );
   return rows.length > 0 && rows[0].role === "admin";
+}
+
+// Middleware pour vérifier l'authentification
+function requireAuth(req, res, next) {
+  const user = getCurrentUser(req);
+  if (!user) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  req.user = user;
+  next();
+}
+
+// Middleware pour vérifier les droits admin
+async function requireAdmin(req, res, next) {
+  const user = getCurrentUser(req);
+  if (!user) {
+    return res.status(401).json({ error: "Authentification requise" });
+  }
+  if (!(await isAdmin(user.id))) {
+    return res.status(403).json({ error: "Accès non autorisé" });
+  }
+  req.user = user;
+  next();
 }
 
 // ===========================================
@@ -625,7 +672,7 @@ app.get("/api/public/products/:id", async (req, res) => {
   }
 });
 
-app.post("/api/products", async (req, res) => {
+app.post("/api/products", requireAuth, async (req, res) => {
   try {
     const {
       sku,
@@ -697,7 +744,7 @@ app.post("/api/products", async (req, res) => {
   }
 });
 
-app.put("/api/products/:id", async (req, res) => {
+app.put("/api/products/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
@@ -815,7 +862,7 @@ app.put("/api/products/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/products/:id", async (req, res) => {
+app.delete("/api/products/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     await pool.execute("DELETE FROM products WHERE id = ?", [id]);
@@ -889,7 +936,7 @@ app.get("/api/public/customers/:id", async (req, res) => {
   }
 });
 
-app.post("/api/customers", async (req, res) => {
+app.post("/api/customers", requireAuth, async (req, res) => {
   try {
     const { phone, name } = req.body;
     if (!phone || !name) {
@@ -919,7 +966,7 @@ app.post("/api/customers", async (req, res) => {
   }
 });
 
-app.put("/api/customers/:id", async (req, res) => {
+app.put("/api/customers/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, phone } = req.body;
@@ -1065,7 +1112,7 @@ app.get("/api/public/sales", async (req, res) => {
   }
 });
 
-app.post("/api/sales", async (req, res) => {
+app.post("/api/sales", requireAuth, async (req, res) => {
   try {
     const { customerId, items, discount, paymentMethod } = req.body;
 
@@ -1387,7 +1434,7 @@ app.get("/api/public/repairs/:id", async (req, res) => {
   }
 });
 
-app.post("/api/repairs", async (req, res) => {
+app.post("/api/repairs", requireAuth, async (req, res) => {
   try {
     const {
       customerId,
@@ -1448,7 +1495,7 @@ app.post("/api/repairs", async (req, res) => {
   }
 });
 
-app.put("/api/repairs/:id", async (req, res) => {
+app.put("/api/repairs/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
